@@ -2,8 +2,13 @@
 
 The PyTorch implementation of **SLAIR**, an all-in-one image restoration framework that restores images in a separated latent space with deterministic transport.
 
-| [Method PDF](src/method.pdf) |
-| --- |
+<p align="center">
+  <img src="assets/method.png" alt="SLAIR method overview" width="900">
+</p>
+
+<p align="center">
+  <a href="src/method.pdf">Method PDF</a>
+</p>
 
 ## Abstract
 
@@ -17,7 +22,7 @@ SLAIR separates degraded and clean images in the VAE latent space, then learns a
 2. Extract paired latents and train the DiT transport model.
 3. Train the high-frequency refinement decoder.
 
-For the detailed formulation and model design, see [`src/method.pdf`](src/method.pdf).
+For the detailed formulation and model design, see [`src/method.pdf`](src/method.pdf). The method overview is also embedded above as [`assets/method.png`](assets/method.png).
 
 ## Environment
 
@@ -115,6 +120,8 @@ The inference script calls `batch_inference.py` through `accelerate`. Set the mo
 
 ```text
 SLAIR/
+|-- assets/
+|   `-- method.png                    # Method overview image for README display
 |-- configs/                         # DiT, decoder, and training configs
 |-- datasets/                        # Dataset and latent dataset loaders
 |-- models/                          # LightningDiT and related model modules
