@@ -6,10 +6,6 @@ The PyTorch implementation of **SLAIR**, an all-in-one image restoration framewo
   <img src="assets/method.png" alt="SLAIR method overview" width="900">
 </p>
 
-<p align="center">
-  <a href="src/method.pdf">Method PDF</a>
-</p>
-
 ## Abstract
 
 We propose SLAIR, an all-in-one image restoration framework integrating latent space separation and deterministic transport. We introduce a latent-space separation approach that ensures stable, distinct representations of degraded and clean images, facilitating effective flow matching. By learning continuous transport flow in a latent space via an ordinary differential equation (ODE), our method enables deterministic restoration without relying on degradation labels or stochastic sampling. While the restoration is performed in the latent space, a high-frequency refinement module is introduced into the latent decoder to handle detail distortion during decoding. Experiments demonstrate that SLAIR outperforms existing approaches in terms of both perceptual quality and computational efficiency, making it a robust solution for scalable, degradation-agnostic image restoration.
@@ -22,7 +18,7 @@ SLAIR separates degraded and clean images in the VAE latent space, then learns a
 2. Extract paired latents and train the DiT transport model.
 3. Train the high-frequency refinement decoder.
 
-For the detailed formulation and model design, see [`src/method.pdf`](src/method.pdf). The method overview is also embedded above as [`assets/method.png`](assets/method.png).
+The method overview is also embedded above as [`assets/method.png`](assets/method.png).
 
 ## Environment
 
