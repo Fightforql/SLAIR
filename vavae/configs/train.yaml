@@ -1,0 +1,51 @@
+model:
+  base_learning_rate: 1.0e-05
+  target: vavae.ldm.models.autoencoder.AutoencoderKL
+  params:
+    monitor: val/rec_loss
+    embed_dim: 32
+    ckpt_path: /openbayes/input/input0/psnr=25.83-v9.ckpt
+    
+    lossconfig:
+      target: vavae.ldm.modules.losses.LPIPSWithDiscriminator
+      params:
+        mse_weight: 0.01
+        perceptual_weight: 0.001
+        #disc_factor: 0.0
+        
+    ddconfig:
+      double_z: true
+      z_channels: 32
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult: [1, 1, 2, 2, 4]
+      num_res_blocks: 2
+      attn_resolutions: [16]
+      dropout: 0.0
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 16
+    wrap: false
+    train:
+      target: vavae.ldm.data.cls_dataset.PairedTrainDataset
+      params:
+        csv_path: /openbayes/input/input0/vae_train.csv
+        image_size: 256
+    validation:
+      target: vavae.ldm.data.cls_dataset.PairedTestDataset
+      params:
+        csv_path: /openbayes/input/input0/vae_val.csv
+        image_size: 256
+
+lightning:
+  trainer:
+    devices: 1
+    num_nodes: 1
+    strategy: auto
+    accelerator: gpu
+    max_epochs: 50
+    precision: bf16-mixed

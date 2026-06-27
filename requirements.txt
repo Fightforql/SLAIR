@@ -1,0 +1,13 @@
+timm==1.0.12
+diffusers==0.32.1
+accelerate
+torchdiffeq
+pytorch_fid
+tensorboard==2.16.2
+omegaconf==2.3.0
+einops
+fairscale
+safetensors
+
+# # use for reconstruction evaluation, optional
+# torchmetrics 

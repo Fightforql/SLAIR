@@ -1,0 +1,95 @@
+# we recommend to read config_details.yaml first.
+
+# To resume training from a checkpoint, you can use either:
+# Option 1: Set train.ckpt (recommended)
+# Option 2: Set ckpt_path at root level (for backward compatibility)
+# Option 3: Set train.resume: true to auto-resume from latest checkpoint in checkpoint_dir
+#ckpt_path: '/openbayes/input/input0/logs/diffusion/vpred_vloss_addy_ddbm_embedyt_nd_512_qknorm_tshift1-dropout-yin-label/checkpoints/0100000.pt' # <---- download our pre-trained lightningdit or your own checkpoint
+
+data:
+  image_size: 512
+  csv_path: '/openbayes/input/input0/5-task_train1.csv'
+  stats_path: '/openbayes/input/input0/latents/5-task_train/latents_stats.pt'
+  num_classes: 10
+  num_workers: 16
+  latent_norm: true
+  latent_multiplier: 1.0
+
+
+valid_data:
+  csv_path: '/openbayes/input/input0/5-task_val1.csv'  
+  stats_path: '/openbayes/input/input0/latents/5-task_val/latents_stats.pt'
+  image_size: 512
+  num_classes: 10
+  num_workers: 16
+  latent_norm: true
+  latent_multiplier: 1.0
+
+# recommend to use default settings (we wil release codes with SD-VAE later)
+vae:
+  model_name: 'vavae_f16d32'
+  downsample_ratio: 16
+  #fusion_ckpt_path: '/openbayes/input/input0/logs/decoder/fusion_train_0228_1439/checkpoints/step_150000.pt'
+
+# recommend to use default settings
+model:
+  model_type: LightningDiT-XL/1
+  use_qknorm: true
+  use_swiglu: true
+  use_rope: true
+  use_rmsnorm: true
+  wo_shift: false
+  in_chans: 32
+  # regularization to reduce overfitting
+  attn_drop: 0.1
+  proj_drop: 0.1
+  mlp_drop: 0.1
+
+# recommend to use default settings
+train:
+  max_steps: 1000000
+  resume: false
+  global_batch_size: 4
+  global_seed: 0
+  output_dir: '/openbayes/input/input0/logs/diffusion'
+  exp_name: 'vpred_vloss-unetskip-dc-5-task-v3' # <---- experiment name, set as you like
+  ckpt: null  # <---- path to checkpoint file to resume training from (e.g., '/path/to/checkpoint/0200000.pt')
+              #       Set to null to start from scratch, or set train.resume: true to auto-resume from latest checkpoint
+  # resume: false  # <---- set to true to auto-resume from latest checkpoint in checkpoint_dir
+  log_every: 100
+  ckpt_every: 50000
+optimizer:
+  lr: 0.0001
+  beta2: 0.95
+  weight_decay: 0.01
+  
+# recommend to use default settings
+transport:
+  path_type: Linear
+  prediction: velocity
+  loss_weight: null
+  sample_eps: null
+  train_eps: null
+  use_cosine_loss: true
+  use_lognorm: true
+
+# recommend to use default settings
+sample:
+  mode: ODE
+  sampling_method: euler
+  atol: 0.000001
+  rtol: 0.001
+  reverse: false
+  likelihood: false
+  num_sampling_steps: 250
+  cfg_scale: 1.0 # <---- cfg scale, for 800 epoch performance with FID=1.35 cfg_scale=6.7
+                  #       for 64 epoch performance with FID=2.11 cfg_scale=10.0
+                  #       you may find we use a large cfg_scale, this is because of 2 reasons:
+                  #       we find a high-dimensional latent space requires a large cfg_scale to get good performance than f8d4 SD-VAE
+                  #       we enable cfg interval, which reduces the negative effects of large cfg on high-noise parts. This means larger cfg can be utilized
+  
+  # recommend to use default settings
+  per_proc_batch_size: 4
+  fid_num: 50000
+  cfg_interval_start: 0.11
+  timestep_shift: 1

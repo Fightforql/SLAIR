@@ -1,0 +1,1 @@
+from vavae.ldm.modules.losses.contperceptual import LPIPSWithDiscriminator
