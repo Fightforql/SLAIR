@@ -2,6 +2,8 @@
 
 The PyTorch implementation of **SLAIR**, an all-in-one image restoration framework that restores images in a separated latent space with deterministic transport.
 
+**Pretrained weights and latent statistics are available at [ash1313/SLAIR](https://huggingface.co/ash1313/SLAIR).**
+
 <p align="center">
   <img src="assets/method.png" alt="SLAIR method overview" width="900">
 </p>
@@ -250,6 +252,10 @@ SLAIR/
 |-- run_inference.sh                 # Inference entry point
 `-- train_decoder_dit.py             # Decoder refinement training entry point
 ```
+
+## Citation
+
+If you find this repository useful, please cite our work.
 
 ## Acknowledgements
 This repo is mainly bulit on [LightningDiT](https://github.com/hustvl/LightningDiT).
