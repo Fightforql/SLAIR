@@ -9,6 +9,8 @@
 data:
   image_size: 512
   csv_path: '/openbayes/input/input0/5-task_train1.csv'
+  # Path to latent statistics generated after latent extraction.
+  # Example: './5task-train.pt' or '<latent_output>/5-task_train_512/latents_stats.pt'
   stats_path: '/openbayes/input/input0/latents/5-task_train/latents_stats.pt'
   num_classes: 10
   num_workers: 16
@@ -18,6 +20,7 @@ data:
 
 valid_data:
   csv_path: '/openbayes/input/input0/5-task_val1.csv'  
+  # Example: './5task-val.pt' or '<latent_output>/5-task_val_512/latents_stats.pt'
   stats_path: '/openbayes/input/input0/latents/5-task_val/latents_stats.pt'
   image_size: 512
   num_classes: 10

@@ -182,8 +182,8 @@ def do_train(train_config, accelerator):
             is_train=False
         )
         valid_stats_path = train_config['valid_data']['stats_path']
-        if not os.path.exists(stats_path):
-            raise FileNotFoundError(f"Latent stats not found at {stats_path}")
+        if not os.path.exists(valid_stats_path):
+            raise FileNotFoundError(f"Validation latent stats not found at {valid_stats_path}")
         valid_latent_stats = torch.load(valid_stats_path, map_location='cpu')
         valid_latent_mean = valid_latent_stats['mean'].to(device)
         valid_latent_std = valid_latent_stats['std'].to(device)
