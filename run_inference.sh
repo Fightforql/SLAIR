@@ -1,4 +1,5 @@
-CONFIG_PATH=$1
+CONFIG_PATH=${1:-configs/lightningdit_xl_vavae_f16d32.yaml}
+shift || true
 export CUDA_VISIBLE_DEVICES=0
 
 GPUS_PER_NODE=1
@@ -11,11 +12,12 @@ PRECISION=${PRECISION:-bf16}
 
 
 accelerate launch \
-    --main_process_ip $MASTER_ADDR \
-    --main_process_port $MASTER_PORT \
-    --machine_rank $NODE_RANK \
+    --main_process_ip "$MASTER_ADDR" \
+    --main_process_port "$MASTER_PORT" \
+    --machine_rank "$NODE_RANK" \
     --num_processes  $(($GPUS_PER_NODE*$NNODES)) \
-    --num_machines $NNODES \
-    --mixed_precision $PRECISION \
+    --num_machines "$NNODES" \
+    --mixed_precision "$PRECISION" \
     batch_inference.py \
-    --config $CONFIG_PATH
+    --config "$CONFIG_PATH" \
+    "$@"

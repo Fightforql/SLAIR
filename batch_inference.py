@@ -105,24 +105,57 @@ from transport import create_transport, Sampler
 from datasets.img_latent_dataset import ImgLatentDataset1
 
 
+def _split_path_values(values):
+    paths = []
+    for value in values or []:
+        for item in str(value).split(","):
+            item = item.strip()
+            if item:
+                paths.append(item)
+    return paths
 
-DATASETS_DIR = '/openbayes/input/input0/latents_with_origin_data/'
-DATASETS_LIST = [
-    os.path.join(DATASETS_DIR, a) 
-    for a in os.listdir(DATASETS_DIR) 
-    if 'train' not in a.lower() and 'val' not in a.lower() and 'GoPro' not in a
-]
-DATASETS_LIST = [
-    '/openbayes/input/input0/latents_with_origin_data/Rain100L_512',
-    '/openbayes/input/input0/latents_with_origin_data/BSD68_512',
-    '/openbayes/input/input0/latents_with_origin_data/LoL_512',
-    '/openbayes/input/input0/latents_with_origin_data/RESIDE_512',
-    '/openbayes/input/input0/latents_with_origin_data/GoPro_512',
-#     '/openbayes/input/input0/latents_with_original_size/under',
-#     '/openbayes/input/input0/latents_with_original_size/LoL',
-#     '/openbayes/input/input0/latents_with_original_size/Outdoor-Rain',
-]
-print(DATASETS_LIST)
+
+def _looks_like_latent_dir(path):
+    return (
+        os.path.isdir(path)
+        and len(glob(os.path.join(path, "*.safetensors"))) > 0
+    )
+
+
+def resolve_dataset_paths(args, config):
+    explicit_paths = _split_path_values(args.data_path)
+    if explicit_paths:
+        return explicit_paths
+
+    if args.datasets_dir:
+        if not os.path.isdir(args.datasets_dir):
+            raise FileNotFoundError(f"--datasets_dir does not exist or is not a directory: {args.datasets_dir}")
+        if args.dataset_names:
+            return [os.path.join(args.datasets_dir, name) for name in args.dataset_names]
+        return [
+            os.path.join(args.datasets_dir, name)
+            for name in sorted(os.listdir(args.datasets_dir))
+            if _looks_like_latent_dir(os.path.join(args.datasets_dir, name))
+        ]
+
+    config_data_path = config.get("data", {}).get("data_path")
+    if isinstance(config_data_path, list):
+        return config_data_path
+    if config_data_path:
+        return [config_data_path]
+    raise ValueError(
+        "No inference latent dataset was provided. Set data.data_path in the config, "
+        "or pass --data_path/--datasets_dir."
+    )
+
+
+def validate_dataset_paths(dataset_paths):
+    missing = [path for path in dataset_paths if not os.path.isdir(path)]
+    if missing:
+        raise FileNotFoundError(f"Inference latent dataset folders do not exist: {missing}")
+    empty = [path for path in dataset_paths if len(glob(os.path.join(path, "*.safetensors"))) == 0]
+    if empty:
+        raise FileNotFoundError(f"Inference latent dataset folders contain no .safetensors shards: {empty}")
 
 def calculate_metrics_for_folder(folder_dir, accelerator, no_fusion=False, lpips_model=None):
     if not accelerator.is_main_process:
@@ -443,9 +476,31 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/lightningdit_b_ldmvae_f16d16.yaml')
     parser.add_argument('--demo', action='store_true', default=False)
+    parser.add_argument(
+        '--data_path',
+        action='append',
+        default=[],
+        help='Path to an extracted latent dataset. Can be repeated or comma-separated.',
+    )
+    parser.add_argument(
+        '--datasets_dir',
+        type=str,
+        default=None,
+        help='Directory containing extracted latent dataset folders. Used when --data_path is not set.',
+    )
+    parser.add_argument(
+        '--dataset_names',
+        nargs='*',
+        default=None,
+        help='Optional folder names under --datasets_dir. If omitted, all latent folders are used.',
+    )
     args = parser.parse_args()
     accelerator = Accelerator()
     original_config = load_config(args.config)
+    datasets_list = resolve_dataset_paths(args, original_config)
+    validate_dataset_paths(datasets_list)
+    if accelerator.process_index == 0:
+        print_with_prefix("Inference datasets:", datasets_list)
 
     # get ckpt_dir
     assert 'ckpt_path' in original_config, "ckpt_path must be specified in config"
@@ -511,7 +566,7 @@ if __name__ == "__main__":
     
     base_exp_name = original_config['train']['exp_name']
     results_table = []
-    for data_path in DATASETS_LIST:
+    for data_path in datasets_list:
        
         current_config = deepcopy(original_config)
         dataset_name = os.path.basename(data_path.rstrip('/'))
