@@ -234,25 +234,6 @@ python train_decoder_dit.py \
   --save_dir /path/to/save/decoder
 ```
 
-## Repository Structure
-
-```text
-SLAIR/
-|-- assets/
-|   `-- method.png                    # Method overview image for README display
-|-- configs/                         # DiT, decoder, and training configs
-|-- datasets/                        # Dataset and latent dataset loaders
-|-- models/                          # LightningDiT and related model modules
-|-- src/method.pdf                   # Method document
-|-- tokenizer/                       # VAE/tokenizer wrappers and configs
-|-- transport/                       # ODE transport and integration utilities
-|-- vavae/                           # VAE training code
-|-- run_extraction.sh                # Latent extraction entry point
-|-- run_train.sh                     # DiT training entry point
-|-- run_inference.sh                 # Inference entry point
-`-- train_decoder_dit.py             # Decoder refinement training entry point
-```
-
 ## Citation
 
 If you find this repository useful, please cite our work.
