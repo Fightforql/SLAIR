@@ -1,19 +1,18 @@
 import argparse
 import logging
 import os
-from collections import Counter
+import gc
 from datetime import datetime
 
 import lpips
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 import torchvision.utils as vutils
 import yaml
 from accelerate import Accelerator
 from PIL import Image
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -23,19 +22,180 @@ from tokenizer.vavae import VA_VAE
 from transport import Sampler, create_transport
 
 
-class FusionLoss(torch.nn.Module):
-    def __init__(self, mse_weight=1.0, perceptual_weight=0.1, device="cuda"):
+class WaveletLoss(torch.nn.Module):
+    def __init__(self, device='cuda'):
         super().__init__()
-        self.mse_weight = mse_weight
-        self.perceptual_weight = perceptual_weight
-        self.perceptual_loss = lpips.LPIPS(net="vgg").to(device).eval()
+        kernel_low = torch.tensor([[0.5, 0.5], [0.5, 0.5]])
+        kernel_h = torch.tensor([[0.5, -0.5], [0.5, -0.5]])
+        kernel_v = torch.tensor([[0.5, 0.5], [-0.5, -0.5]])
+        kernel_d = torch.tensor([[0.5, -0.5], [-0.5, 0.5]])
+
+        self.kernel = torch.stack([kernel_low, kernel_h, kernel_v, kernel_d], dim=0).unsqueeze(1).to(device)
+        self.kernel.requires_grad_(False)
+
+    def get_wavelet_coeffs(self, x):
+        b, c, h, w = x.shape
+        x = x.view(b * c, 1, h, w)
+        coeffs = F.conv2d(x, self.kernel, stride=2)
+        coeffs = coeffs.view(b, c, 4, h // 2, w // 2)
+        return coeffs # [B, C, 4, H/2, W/2]
+
+    def forward(self, pred, target):
+        pred_coeffs = self.get_wavelet_coeffs(pred)
+        target_coeffs = self.get_wavelet_coeffs(target)
+
+        hf_loss = F.l1_loss(pred_coeffs[:, :, 1:], target_coeffs[:, :, 1:])
+        return hf_loss
+
+class FusionLoss(torch.nn.Module):
+    def __init__(self, mse_weight=1.0, perceptual_weight=0.1, high_freq_weight=0.5, device='cuda',
+                 adaptive_weight=True, momentum=0.99):
+        super().__init__()
+        self.base_mse_weight = mse_weight
+        self.base_perceptual_weight = perceptual_weight
+        self.base_high_freq_weight = high_freq_weight
+
+
+        # Track loss statistics for adaptive weights after a 1,000-step warmup.
+        self.adaptive_weight = adaptive_weight
+        self.momentum = momentum
+
+
+        self.register_buffer('mse_mean', torch.tensor(0.0))
+        self.register_buffer('mse_std', torch.tensor(1.0))
+        self.register_buffer('p_loss_mean', torch.tensor(0.1))
+        self.register_buffer('p_loss_std', torch.tensor(0.05))
+        self.register_buffer('hf_loss_mean', torch.tensor(0.01))
+        self.register_buffer('hf_loss_std', torch.tensor(0.01))
+        self.register_buffer('step_count', torch.tensor(0))
+
+
+        self.current_mse_weight = mse_weight
+        self.current_p_weight = perceptual_weight
+        self.current_hf_weight = high_freq_weight
+
+        self.perceptual_loss = lpips.LPIPS(net='vgg').to(device).eval()
         self.perceptual_loss.requires_grad_(False)
+        self.wavelet_loss = WaveletLoss(device=device)
 
     def forward(self, inputs, rec):
-        mse_loss = F.mse_loss(rec.float(), inputs.float(), reduction="mean")
+
+
+        if inputs.dtype != torch.float32:
+            inputs = inputs.float()
+        if rec.dtype != torch.float32:
+            rec = rec.float()
+
+        mse_loss = F.mse_loss(rec, inputs, reduction='mean')
+        hf_loss = self.wavelet_loss(rec, inputs)
         p_loss = self.perceptual_loss(inputs, rec).mean()
-        loss = self.perceptual_weight * p_loss + self.mse_weight * mse_loss
-        return loss, mse_loss, p_loss
+
+        if self.adaptive_weight and self.training:
+
+            warmup_steps = 1000
+
+            with torch.no_grad():
+                self.step_count += 1
+
+
+                mse_val = mse_loss.item()
+                p_val = p_loss.item()
+                hf_val = hf_loss.item()
+
+                if self.step_count <= warmup_steps:
+
+
+                    if self.step_count.item() == 1:
+                        alpha = 0.5
+                    else:
+                        alpha = 1.0 / self.step_count.item()
+                    self.mse_mean = (1 - alpha) * self.mse_mean + alpha * mse_val
+                    self.p_loss_mean = (1 - alpha) * self.p_loss_mean + alpha * p_val
+                    self.hf_loss_mean = (1 - alpha) * self.hf_loss_mean + alpha * hf_val
+                else:
+
+                    self.mse_mean = self.momentum * self.mse_mean + (1 - self.momentum) * mse_val
+                    self.p_loss_mean = self.momentum * self.p_loss_mean + (1 - self.momentum) * p_val
+                    self.hf_loss_mean = self.momentum * self.hf_loss_mean + (1 - self.momentum) * hf_val
+
+
+                mse_diff = abs(mse_val - self.mse_mean.item())
+                p_diff = abs(p_val - self.p_loss_mean.item())
+                hf_diff = abs(hf_val - self.hf_loss_mean.item())
+
+                if self.step_count <= warmup_steps:
+
+                    if self.step_count.item() == 1:
+                        alpha = 0.5
+                    else:
+                        alpha = 1.0 / self.step_count.item()
+                    self.mse_std = (1 - alpha) * self.mse_std + alpha * mse_diff
+                    self.p_loss_std = (1 - alpha) * self.p_loss_std + alpha * p_diff
+                    self.hf_loss_std = (1 - alpha) * self.hf_loss_std + alpha * hf_diff
+                else:
+                    self.mse_std = self.momentum * self.mse_std + (1 - self.momentum) * mse_diff
+                    self.p_loss_std = self.momentum * self.p_loss_std + (1 - self.momentum) * p_diff
+                    self.hf_loss_std = self.momentum * self.hf_loss_std + (1 - self.momentum) * hf_diff
+
+
+            if self.step_count <= warmup_steps:
+                mse_weight = self.base_mse_weight
+                p_weight = self.base_perceptual_weight
+                hf_weight = self.base_high_freq_weight
+
+
+                self.current_mse_weight = mse_weight
+                self.current_p_weight = p_weight
+                self.current_hf_weight = hf_weight
+            else:
+
+
+                mse_z = (mse_val - self.mse_mean.item()) / (self.mse_std.item() + 1e-6)
+                p_z = (p_val - self.p_loss_mean.item()) / (self.p_loss_std.item() + 1e-6)
+                hf_z = (hf_val - self.hf_loss_mean.item()) / (self.hf_loss_std.item() + 1e-6)
+
+
+                # Reduce weights for unusually large losses and gently raise them for small losses.
+                def adjust_weight(base_weight, z_score, scale=0.15):
+
+
+                    if z_score > 0:
+
+                        adjustment = 1.0 / (1.0 + scale * z_score)
+                    else:
+
+                        adjustment = 1.0 + scale * abs(z_score) * 0.5
+                    return base_weight * adjustment
+
+                mse_weight = adjust_weight(self.base_mse_weight, mse_z, scale=0.15)
+                p_weight = adjust_weight(self.base_perceptual_weight, p_z, scale=0.15)
+                hf_weight = adjust_weight(self.base_high_freq_weight, hf_z, scale=0.15)
+
+
+                mse_weight = max(self.base_mse_weight * 0.3, min(mse_weight, self.base_mse_weight * 2.0))
+                p_weight = max(self.base_perceptual_weight * 0.3, min(p_weight, self.base_perceptual_weight * 2.0))
+                hf_weight = max(self.base_high_freq_weight * 0.3, min(hf_weight, self.base_high_freq_weight * 2.0))
+
+
+                self.current_mse_weight = mse_weight
+                self.current_p_weight = p_weight
+                self.current_hf_weight = hf_weight
+        else:
+
+            mse_weight = self.base_mse_weight
+            p_weight = self.base_perceptual_weight
+            hf_weight = self.base_high_freq_weight
+
+
+            self.current_mse_weight = mse_weight
+            self.current_p_weight = p_weight
+            self.current_hf_weight = hf_weight
+
+        loss = (p_weight * p_loss +
+                mse_weight * mse_loss +
+                hf_weight * hf_loss)
+
+        return loss, mse_loss, p_loss, hf_loss
 
 
 def denorm(tensor):
@@ -49,36 +209,50 @@ def save_image_local(canvas, log_dir, global_step, prefix="train"):
     vutils.save_image(canvas, os.path.join(save_path, file_name))
 
 
-def build_weighted_sampler(csv_path, num_samples):
-    all_labels = pd.read_csv(csv_path).iloc[:, 2].values
-    label_counts = Counter(all_labels)
-    sample_weights = np.array([1.0 / label_counts[label] for label in all_labels], dtype=np.float32)
-    sample_weights = torch.from_numpy(sample_weights)
+def center_crop_arr(pil_image, image_size):
+    while min(*pil_image.size) >= 2 * image_size:
+        pil_image = pil_image.resize(tuple(x // 2 for x in pil_image.size), resample=Image.BOX)
+    scale = image_size / min(*pil_image.size)
+    pil_image = pil_image.resize(tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC)
+    arr = np.array(pil_image)
+    crop_y, crop_x = (arr.shape[0] - image_size) // 2, (arr.shape[1] - image_size) // 2
+    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
+
+class OnlineDecoderDataset(ImgPatchDataset):
+    """Match the cached decoder training images without storing latents."""
+
+    def __getitem__(self, idx):
+        row = self.data_info.iloc[idx]
+        with Image.open(row.iloc[0]) as image:
+            pixel_in = center_crop_arr(image.convert("RGB"), 512)
+        with Image.open(row.iloc[1]) as image:
+            pixel_gt = center_crop_arr(image.convert("RGB"), 512)
+        pixel_in = Image.fromarray(self.histogram_match_np(np.array(pixel_in), np.array(pixel_gt)))
+        return self.pixel_transform(pixel_gt), self.pixel_transform(pixel_in), torch.tensor(int(row.iloc[2]), dtype=torch.long)
+
+
+def build_decoder_dataloaders(csv_path):
+    dataset = OnlineDecoderDataset(csv_path=csv_path, patch_size=512, is_train=False)
+    indices = np.arange(len(dataset))
+    np.random.shuffle(indices)
+    train_size = int(0.98 * len(dataset))
+    train_idx, val_idx = indices[:train_size], indices[train_size:]
+    rain_prefixes = ("/openbayes/input/input0/Rain1400", "/openbayes/input/input0/Outdoor-Rain")
+    moire_prefix = "/openbayes/input/input0/AIO/train/9"
+    hard_samples = [
+        any(prefix in str(dataset.data_info.iloc[i, 0]) for prefix in rain_prefixes)
+        or moire_prefix in str(dataset.data_info.iloc[i, 0])
+        for i in train_idx
+    ]
+    num_hard = sum(hard_samples)
     sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=num_samples,
+        [2.0 if hard else 1.0 for hard in hard_samples],
+        num_samples=len(train_idx) + num_hard,
         replacement=True,
     )
-    return sampler, label_counts
-
-
-def build_dataloader(csv_path, patch_size, batch_size, num_workers, is_train, balance_labels):
-    dataset = ImgPatchDataset(csv_path=csv_path, patch_size=patch_size, is_train=is_train)
-    sampler = None
-    label_counts = None
-    if is_train and balance_labels:
-        sampler, label_counts = build_weighted_sampler(csv_path, len(dataset))
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        shuffle=sampler is None and is_train,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=is_train,
-    )
-    return dataset, loader, label_counts
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=2, sampler=sampler, num_workers=8, pin_memory=True)
+    val_loader = DataLoader(Subset(dataset, val_idx), batch_size=2, shuffle=True)
+    return dataset, train_loader, val_loader, num_hard
 
 
 def refine_latents(pixel_in, label, autoencoder, dit_model, sample_fn, latent_mean, latent_std, latent_multiplier, cfg_scale, cfg_interval_start):
@@ -156,7 +330,7 @@ def run_validation(autoencoder, dit_model, sample_fn, val_loader, loss_module, d
         rec_fine = autoencoder.decode(z_refined, feats=feats)
         rec_orig = autoencoder.decode(z_refined, feats=None)
 
-        _, mse_loss, p_loss = loss_module(pixel_gt, rec_fine)
+        _, mse_loss, p_loss, hf_loss = loss_module(pixel_gt, rec_fine)
         val_mses.append(mse_loss.item())
         val_lpips.append(p_loss.item())
 
@@ -237,7 +411,7 @@ def train_fusion_layer(config_path, dit_ckpt_path=None, custom_save_dir=None):
     for name, param in autoencoder.decoder.named_parameters():
         if "fusion_layers" in name:
             param.requires_grad = True
-            if "encode_enc_3.conv_out" in name:
+            if "conv_out" in name:
                 torch.nn.init.zeros_(param)
             else:
                 torch.nn.init.constant_(param, 1e-6)
@@ -291,35 +465,17 @@ def train_fusion_layer(config_path, dit_ckpt_path=None, custom_save_dir=None):
     latent_multiplier = train_config["data"].get("latent_multiplier", 1.0)
     latent_stats_tuple = (latent_mean, latent_std, latent_multiplier)
 
-    batch_size_per_gpu = int(np.round(train_config["train"]["global_batch_size"] / accelerator.num_processes))
-    global_batch_size = batch_size_per_gpu * accelerator.num_processes
-
-    train_dataset, train_loader, train_label_counts = build_dataloader(
-        csv_path=train_csv_path,
-        patch_size=train_config["data"]["image_size"],
-        batch_size=batch_size_per_gpu,
-        num_workers=train_config["data"]["num_workers"],
-        is_train=True,
-        balance_labels=True,
-    )
-
-    val_loader = None
-    if "valid_data" in train_config and train_config["valid_data"].get("csv_path"):
-        _, val_loader, _ = build_dataloader(
-            csv_path=train_config["valid_data"]["csv_path"],
-            patch_size=train_config["valid_data"]["image_size"],
-            batch_size=min(4, batch_size_per_gpu),
-            num_workers=min(4, train_config["valid_data"].get("num_workers", train_config["data"]["num_workers"])),
-            is_train=False,
-            balance_labels=False,
-        )
+    train_dataset, train_loader, val_loader, num_hard = build_decoder_dataloaders(train_csv_path)
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, autoencoder.decoder.parameters()),
-        lr=5e-5,
-        weight_decay=1e-4,
+        lr=1e-4,
     )
-    loss_module = FusionLoss(mse_weight=0.01, perceptual_weight=0.001, device=device)
+    # Keep the reference weights, including its disabled high-frequency contribution.
+    loss_module = FusionLoss(
+        mse_weight=1.0, perceptual_weight=0.5, high_freq_weight=0,
+        device=device, adaptive_weight=True, momentum=0.99,
+    ).to(device)
 
     if val_loader is not None:
         autoencoder, dit_model, optimizer, train_loader, val_loader = accelerator.prepare(
@@ -335,20 +491,17 @@ def train_fusion_layer(config_path, dit_ckpt_path=None, custom_save_dir=None):
 
     cfg_scale = train_config["sample"].get("cfg_scale", 1.0)
     cfg_interval_start = train_config["sample"].get("cfg_interval_start", 0.0)
-    log_every = train_config["train"].get("log_every", 100)
-    ckpt_every = train_config["train"].get("ckpt_every", 500)
-    val_every = train_config["train"].get("val_every", 3000)
-    max_steps = train_config["train"].get("max_steps", 100000)
+    log_every = 100
+    ckpt_every = 2000
+    val_every = 2000
 
     if accelerator.is_main_process:
-        logger.info(f"Dataset contains {len(train_dataset)} images")
-        logger.info(f"Batch size {batch_size_per_gpu} per gpu, with {global_batch_size} global batch size")
-        logger.info(f"Label distribution: {dict(sorted(train_label_counts.items()))}")
-        logger.info(f"WeightedRandomSampler: num_samples={len(train_dataset)}")
+        logger.info(f"Dataset contains {len(train_dataset)} images; hard training samples: {num_hard}")
+        logger.info("Batch size: 2 per process; training for 10 epochs")
+        logger.info("Loss weights: MSE=1.0, LPIPS=0.5, high_freq=0; adaptive=True, momentum=0.99")
 
     global_step = 0
-    epoch = 0
-    while global_step < max_steps:
+    for epoch in range(10):
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process, dynamic_ncols=True, desc=f"Epoch {epoch}")
         for pixel_gt, pixel_in, label in pbar:
             pixel_gt = pixel_gt.to(device)
@@ -370,7 +523,7 @@ def train_fusion_layer(config_path, dit_ckpt_path=None, custom_save_dir=None):
                 )
 
             rec = autoencoder.decode(z_refined, feats=feats)
-            total_loss, mse_loss, p_loss = loss_module(pixel_gt, rec)
+            total_loss, mse_loss, p_loss, hf_loss = loss_module(pixel_gt, rec)
 
             optimizer.zero_grad()
             accelerator.backward(total_loss)
@@ -380,9 +533,13 @@ def train_fusion_layer(config_path, dit_ckpt_path=None, custom_save_dir=None):
                 writer.add_scalar("Loss/total_loss", total_loss.item(), global_step)
                 writer.add_scalar("Loss/mse_loss", mse_loss.item(), global_step)
                 writer.add_scalar("Loss/p_loss", p_loss.item(), global_step)
+                writer.add_scalar("Loss/high_freq", hf_loss.item(), global_step)
+                writer.add_scalar("Weights/mse", loss_module.current_mse_weight, global_step)
+                writer.add_scalar("Weights/perceptual", loss_module.current_p_weight, global_step)
+                writer.add_scalar("Weights/high_freq", loss_module.current_hf_weight, global_step)
 
                 if global_step % log_every == 0:
-                    pbar.set_postfix(loss=f"{total_loss.item():.4f}", mse=f"{mse_loss.item():.4f}", lpips=f"{p_loss.item():.4f}")
+                    pbar.set_postfix(loss=f"{total_loss.item():.4f}", mse=f"{mse_loss.item():.4f}", lpips=f"{p_loss.item():.4f}", hf=f"{hf_loss.item():.4f}")
 
                 if global_step % 1000 == 0:
                     with torch.no_grad():
@@ -428,10 +585,10 @@ def train_fusion_layer(config_path, dit_ckpt_path=None, custom_save_dir=None):
                     )
 
             global_step += 1
-            if global_step >= max_steps:
-                break
-
-        epoch += 1
+            del rec, total_loss, mse_loss, p_loss, hf_loss, feats, z_refined
+            if global_step % 100 == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
