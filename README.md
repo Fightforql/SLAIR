@@ -5,7 +5,7 @@ The PyTorch implementation of **SLAIR**, an all-in-one image restoration framewo
 **Pretrained weights and latent statistics are available at [ash1313/SLAIR](https://huggingface.co/ash1313/SLAIR).**
 
 <p align="center">
-  <img src="assets/method.png" alt="SLAIR method overview" width="900">
+  <a href="assets/method.png"><img src="assets/method.png" alt="SLAIR method overview" width="100%"></a>
 </p>
 
 ## TODO
